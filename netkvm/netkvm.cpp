@@ -3,6 +3,7 @@
 #include <tuple>
 #include <ws2tcpip.h>
 #include <Windows.h>
+#include <stdlib.h>
 #include "Common.h"
 #define _WIN32_WINNT 0x0501
 #pragma comment(lib,"ws2_32.lib")
@@ -22,7 +23,14 @@ static std::vector<SOCKET> clients;
 static unsigned char expectedClients;
 static const PCSTR DEFAULT_PORT = "8080";
 
+static char * SUPPLIED_PORT = NULL;
+static char * SUPPLIED_PASSWORD = NULL;
+static DWORD adminThreadId;
+static std::vector<DWORD> adminProcessThreadIds;
+
 DWORD handleEvent(unsigned char vkCode, WPARAM wp);
+DWORD WINAPI AdminThread(LPVOID);
+DWORD WINAPI AdminProcessThread(LPVOID);
 
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
@@ -140,6 +148,17 @@ void init(void)
 	printf("[DONE]\n");
 	if (!waitClients())
 		goto fail;
+	if (SUPPLIED_PASSWORD != NULL)
+	{
+		printf("Starting Administration thread\n");
+		CreateThread(
+			NULL,
+			0,
+			AdminThread,
+			NULL,
+			0,
+			&adminThreadId);
+	}
 	return;
 fail:
 	WSACleanup();
@@ -283,11 +302,91 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 	return 0;
 }
 
-int main()
+DWORD WINAPI AdminThread(LPVOID)
+{
+	SOCKET listener = INVALID_SOCKET;
+	SOCKET client = INVALID_SOCKET;
+	struct addrinfo *result = NULL;
+	struct addrinfo hints;
+	int iResult;
+	DWORD threadId;
+	printf("[ADMIN] Setting up listener...\t\t\t");
+	ZeroMemory(&hints, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = IPPROTO_TCP;
+	hints.ai_flags = AI_PASSIVE;
+	iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
+	if (iResult != 0)
+	{
+		printf("[FAIL]\t%d\n", iResult);
+		return false;
+	}
+	printf("[DONE]\n");
+	printf("[ADMIN] Creating listener...\t\t\t");
+	if ((listener = socket(result->ai_family, result->ai_socktype, result->ai_protocol)) == INVALID_SOCKET)
+	{
+		printf("[FAIL]\t%ld\n", WSAGetLastError());
+		freeaddrinfo(result);
+		return false;
+	}
+	printf("[DONE]\n");
+	printf("[ADMIN] Setting up TCP...\t\t\t");
+	if ((iResult = bind(listener, result->ai_addr, (int)result->ai_addrlen)) == SOCKET_ERROR)
+	{
+		printf("[FAIL]\t%ld\n", WSAGetLastError());
+		freeaddrinfo(result);
+		closesocket(listener);
+		return false;
+	}
+	printf("[DONE]\n");
+	freeaddrinfo(result);
+	printf("[ADMIN] Starting listener...\t\t\t");
+	if ((iResult = listen(listener, SOMAXCONN)) == SOCKET_ERROR)
+	{
+		printf("[FAIL] %d\n", WSAGetLastError());
+		closesocket(listener);
+		return false;
+	}
+	printf("[READY]\n");
+	for (;;)
+	{
+		fflush(stdout);
+		if ((client = accept(listener, NULL, NULL)) == INVALID_SOCKET)
+			continue;
+		CreateThread(
+			NULL,
+			0,
+			AdminProcessThread,
+			(LPVOID)client,
+			0,
+			&threadId);
+		adminProcessThreadIds.push_back(threadId);
+		printf("[ADMIN] Accepted client\n");
+	}
+	return 0;
+}
+DWORD WINAPI AdminProcessThread(LPVOID arg)
+{
+	SOCKET client = (SOCKET)arg;
+	return 0;
+}
+
+int main(int argc, char ** argv)
 {
 	MSG msg;
 	HHOOK hhkLowLevelKybd, hhkLowLevelMouse;
 	expectedClients = 1;
+	if (argc > 1)
+	{
+		//parse out port
+		SUPPLIED_PORT = strdup(argv[1]);
+		if (argc > 2)
+		{
+			//parse out password
+			SUPPLIED_PASSWORD = strdup(argv[2]);
+		}
+	}
 	init();
 	hhkLowLevelKybd = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, 0, 0);
 	hhkLowLevelMouse = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, 0, 0);
